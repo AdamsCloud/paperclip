@@ -1,5 +1,5 @@
 services:
-  paperclip-dev:
+  paperclip:
     build:
       context: .
       dockerfile: Dockerfile
