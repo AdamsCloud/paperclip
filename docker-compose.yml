@@ -1,0 +1,67 @@
+networks:
+  ai-net:
+    external: true # 关键：使用外部网络
+
+services:
+  pg17:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+    # image: postgres:17-alpine
+    image: postgres:17
+    networks:
+      - ai-net # 服务必须指定网络
+    environment:
+      POSTGRES_USER: paperclip
+      POSTGRES_PASSWORD: paperclip
+      POSTGRES_DB: paperclip
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U paperclip -d paperclip']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    ports:
+      - '5432:5432'
+    volumes:
+      - pg17data:/var/lib/postgresql/data
+
+  paperclip:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+    build: .
+    ports:
+      # - "3100:3100"
+      - '${PAPERCLIP_PORT:-3100}:3100'
+    networks:
+      - ai-net # 服务必须指定网络
+    environment:
+      # DATABASE_URL: postgres://paperclip:paperclip@pg17:5432/paperclip
+      HOST: '0.0.0.0'
+      PAPERCLIP_HOME: '/paperclip'
+      PORT: '3100'
+      SERVE_UI: 'true'
+      OPENAI_API_KEY: '${OPENAI_API_KEY:-}'
+      # ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      ANTHROPIC_AUTH_TOKEN: '${ANTHROPIC_AUTH_TOKEN:-}'
+      ANTHROPIC_BASE_URL: '${ANTHROPIC_BASE_URL:-}'
+      PAPERCLIP_DEPLOYMENT_MODE: 'authenticated'
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: 'private'
+      PAPERCLIP_PUBLIC_URL: '${PAPERCLIP_PUBLIC_URL:-http://localhost:3100}'
+      BETTER_AUTH_SECRET: '${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET must be set}'
+      PAPERCLIP_ALLOWED_HOSTNAMES: '${PAPERCLIP_ALLOWED_HOSTNAMES:?PAPERCLIP_ALLOWED_HOSTNAMES must be set}'
+    volumes:
+      - paperclip-data:/paperclip
+    depends_on:
+      pg17:
+        condition: service_healthy
+
+volumes:
+  pg17data:
+  paperclip-data:
