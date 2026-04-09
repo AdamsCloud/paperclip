@@ -675,6 +675,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
     executionWorkspaceSettings?: Record<string, unknown> | null;
   }) {
     const resolvedVariables = resolveRoutineVariableValues(input.routine.variables ?? [], input);
+    const title = interpolateRoutineTemplate(input.routine.title, resolvedVariables) ?? input.routine.title;
     const description = interpolateRoutineTemplate(input.routine.description, resolvedVariables);
     const triggerPayload = mergeRoutineRunPayload(input.payload, resolvedVariables);
     const run = await db.transaction(async (tx) => {
@@ -748,7 +749,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
             projectId: input.routine.projectId,
             goalId: input.routine.goalId,
             parentId: input.routine.parentIssueId,
-            title: input.routine.title,
+            title,
             description,
             status: "todo",
             priority: input.routine.priority,
@@ -996,7 +997,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
       if (input.goalId) await assertGoal(companyId, input.goalId);
       if (input.parentIssueId) await assertParentIssue(companyId, input.parentIssueId);
       const variables = syncRoutineVariablesWithTemplate(
-        input.description,
+        [input.title, input.description],
         sanitizeRoutineVariableInputs(input.variables),
       );
       assertRoutineVariableDefinitions(variables);
@@ -1029,9 +1030,10 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
       if (!existing) return null;
       const nextProjectId = patch.projectId ?? existing.projectId;
       const nextAssigneeAgentId = patch.assigneeAgentId ?? existing.assigneeAgentId;
+      const nextTitle = patch.title ?? existing.title;
       const nextDescription = patch.description === undefined ? existing.description : patch.description;
       const nextVariables = syncRoutineVariablesWithTemplate(
-        nextDescription,
+        [nextTitle, nextDescription],
         patch.variables === undefined ? existing.variables : sanitizeRoutineVariableInputs(patch.variables),
       );
       if (patch.projectId) await assertProject(existing.companyId, nextProjectId);
@@ -1060,7 +1062,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
           projectId: nextProjectId,
           goalId: patch.goalId === undefined ? existing.goalId : patch.goalId,
           parentIssueId: patch.parentIssueId === undefined ? existing.parentIssueId : patch.parentIssueId,
-          title: patch.title ?? existing.title,
+          title: nextTitle,
           description: nextDescription,
           assigneeAgentId: nextAssigneeAgentId,
           priority: patch.priority ?? existing.priority,
@@ -1251,6 +1253,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
     firePublicTrigger: async (publicId: string, input: {
       authorizationHeader?: string | null;
       signatureHeader?: string | null;
+      hubSignatureHeader?: string | null;
       timestampHeader?: string | null;
       idempotencyKey?: string | null;
       rawBody?: Buffer | null;
@@ -1266,8 +1269,29 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
       if (!routine) throw notFound("Routine not found");
       if (!trigger.enabled || routine.status !== "active") throw conflict("Routine trigger is not active");
 
-      const secretValue = await resolveTriggerSecret(trigger, routine.companyId);
-      if (trigger.signingMode === "bearer") {
+      if (trigger.signingMode === "none") {
+        // No authentication — the publicId in the URL acts as a shared secret.
+      } else if (trigger.signingMode === "github_hmac") {
+        const secretValue = await resolveTriggerSecret(trigger, routine.companyId);
+        const rawBody = input.rawBody ?? Buffer.from(JSON.stringify(input.payload ?? {}));
+        // Accept X-Hub-Signature-256 (GitHub/Sentry) or fall back to the
+        // generic X-Paperclip-Signature header so operators can use github_hmac
+        // mode with either header convention.
+        const providedSignature = (input.hubSignatureHeader ?? input.signatureHeader)?.trim() ?? "";
+        if (!providedSignature) throw unauthorized();
+        const expectedHmac = crypto
+          .createHmac("sha256", secretValue)
+          .update(rawBody)
+          .digest("hex");
+        const normalizedSignature = providedSignature.replace(/^sha256=/, "");
+        const normalizedBuf = Buffer.from(normalizedSignature);
+        const expectedBuf = Buffer.from(expectedHmac);
+        const valid =
+          normalizedBuf.length === expectedBuf.length &&
+          crypto.timingSafeEqual(normalizedBuf, expectedBuf);
+        if (!valid) throw unauthorized();
+      } else if (trigger.signingMode === "bearer") {
+        const secretValue = await resolveTriggerSecret(trigger, routine.companyId);
         const expected = `Bearer ${secretValue}`;
         const provided = input.authorizationHeader?.trim() ?? "";
         const expectedBuf = Buffer.from(expected);
@@ -1280,6 +1304,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
           throw unauthorized();
         }
       } else {
+        const secretValue = await resolveTriggerSecret(trigger, routine.companyId);
         const rawBody = input.rawBody ?? Buffer.from(JSON.stringify(input.payload ?? {}));
         const providedSignature = input.signatureHeader?.trim() ?? "";
         const providedTimestamp = input.timestampHeader?.trim() ?? "";

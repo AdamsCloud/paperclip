@@ -332,7 +332,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
         projectId,
         goalId: null,
         parentIssueId: null,
-        title: "repo triage",
+        title: "repo triage for {{repo}}",
         description: "Review {{repo}} for {{priority}} bugs",
         assigneeAgentId: agentId,
         priority: "medium",
@@ -346,6 +346,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       },
       {},
     );
+    expect(variableRoutine.variables.map((variable) => variable.name)).toEqual(["repo", "priority"]);
 
     const run = await svc.runRoutine(variableRoutine.id, {
       source: "manual",
@@ -353,7 +354,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     });
 
     const storedIssue = await db
-      .select({ description: issues.description })
+      .select({ title: issues.title, description: issues.description })
       .from(issues)
       .where(eq(issues.id, run.linkedIssueId!))
       .then((rows) => rows[0] ?? null);
@@ -363,6 +364,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       .where(eq(routineRuns.id, run.id))
       .then((rows) => rows[0] ?? null);
 
+    expect(storedIssue?.title).toBe("repo triage for paperclip");
     expect(storedIssue?.description).toBe("Review paperclip for high bugs");
     expect(storedRun?.triggerPayload).toEqual({
       variables: {
@@ -616,5 +618,73 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     expect(run.source).toBe("webhook");
     expect(run.status).toBe("issue_created");
     expect(run.linkedIssueId).toBeTruthy();
+  });
+
+  it("accepts GitHub-style X-Hub-Signature-256 with github_hmac signing mode", async () => {
+    const { routine, svc } = await seedFixture();
+    const { trigger, secretMaterial } = await svc.createTrigger(
+      routine.id,
+      {
+        kind: "webhook",
+        signingMode: "github_hmac",
+      },
+      {},
+    );
+
+    const payload = { action: "opened", pull_request: { number: 1 } };
+    const rawBody = Buffer.from(JSON.stringify(payload));
+    const signature = `sha256=${createHmac("sha256", secretMaterial!.webhookSecret)
+      .update(rawBody)
+      .digest("hex")}`;
+
+    const run = await svc.firePublicTrigger(trigger.publicId!, {
+      hubSignatureHeader: signature,
+      rawBody,
+      payload,
+    });
+
+    expect(run.source).toBe("webhook");
+    expect(run.status).toBe("issue_created");
+  });
+
+  it("rejects invalid signature for github_hmac signing mode", async () => {
+    const { routine, svc } = await seedFixture();
+    const { trigger } = await svc.createTrigger(
+      routine.id,
+      {
+        kind: "webhook",
+        signingMode: "github_hmac",
+      },
+      {},
+    );
+
+    const rawBody = Buffer.from(JSON.stringify({ ok: true }));
+
+    await expect(
+      svc.firePublicTrigger(trigger.publicId!, {
+        hubSignatureHeader: "sha256=0000000000000000000000000000000000000000000000000000000000000000",
+        rawBody,
+        payload: { ok: true },
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("accepts any request with none signing mode", async () => {
+    const { routine, svc } = await seedFixture();
+    const { trigger } = await svc.createTrigger(
+      routine.id,
+      {
+        kind: "webhook",
+        signingMode: "none",
+      },
+      {},
+    );
+
+    const run = await svc.firePublicTrigger(trigger.publicId!, {
+      payload: { event: "error.created" },
+    });
+
+    expect(run.source).toBe("webhook");
+    expect(run.status).toBe("issue_created");
   });
 });
